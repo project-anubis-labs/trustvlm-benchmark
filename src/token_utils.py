@@ -1,21 +1,17 @@
 import torch
 
+
 def get_token_ids(processor, word):
-    # Add leading space → matches generation behavior
+    # Leading space matches LLaMA tokenizer's generation behaviour
     word = " " + word.strip()
-    
-    tokens = processor.tokenizer(
-        word,
-        add_special_tokens=False
-    ).input_ids
-    
+    tokens = processor.tokenizer(word, add_special_tokens=False).input_ids
     return tokens
 
-import torch
 
-def compute_sequence_probability(model, processor, device, image, prompt, token_ids):
+def compute_sequence_log_prob(model, processor, device, image, prompt, token_ids):
     """
-    Computes P(token1, token2, ...) correctly using autoregressive conditioning
+    Computes log P(token_1, token_2, ...) via autoregressive conditioning.
+    Returns a scalar float (sum of per-token log-probs).
     """
     inputs = processor(
         text=prompt,
@@ -29,14 +25,16 @@ def compute_sequence_probability(model, processor, device, image, prompt, token_
         with torch.no_grad():
             outputs = model(**inputs)
 
-        logits = outputs.logits[:, -1, :]
-        probs = torch.softmax(logits, dim=-1)
+        # log_softmax is numerically stable; avoids softmax + log + epsilon
+        log_probs = torch.log_softmax(outputs.logits[:, -1, :], dim=-1)
+        total_log_prob += log_probs[0, token_id].item()
 
-        prob = probs[0, token_id]
-        total_log_prob += torch.log(prob + 1e-12)
-
-        # Append token to input for next step
-        next_token = torch.tensor([[token_id]]).to(device)
+        # Append the token and extend the attention mask to match
+        next_token = torch.tensor([[token_id]], dtype=torch.long, device=device)
         inputs["input_ids"] = torch.cat([inputs["input_ids"], next_token], dim=1)
+        inputs["attention_mask"] = torch.cat(
+            [inputs["attention_mask"], torch.ones((1, 1), dtype=torch.long, device=device)],
+            dim=1
+        )
 
-    return torch.exp(total_log_prob).item()
+    return total_log_prob
